@@ -78,7 +78,7 @@ def run_tracker(poll_interval=5, idle_threshold=180):
                 print(f"[EVENT] {event_data['process']} -> {event_data['window_title']}")
                 
                 try:
-                    requests.post(BACKEND_URL, json=event_data)
+                    requests.post(BACKEND_URL, json=event_data, timeout=1.0) # Short timeout to avoid hanging if backend is down
                 except requests.exceptions.ConnectionError:
                     print("[!] Backend is down. Event not sent.")
 

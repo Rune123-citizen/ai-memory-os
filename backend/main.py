@@ -156,7 +156,11 @@ def consolidate_memory():
         # 4. Wipe SQLite to keep it fast (Optional: comment this out if you want to keep raw logs for now)
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM events") 
+        #cursor.execute("DELETE FROM events") #previously: Deleting everything but now 
+        now_str = datetime.now().isoformat()
+        cursor.execute("DELETE FROM events WHERE timestamp < ?", (now_str,)) 
+        #only delete events older than now, just in case there are any future-dated logs for some reason. \
+        #This is a safer approach that ensures we don't accidentally delete the consolidated memory we just created if it happens to have a timestamp issue.
         conn.commit()
         conn.close()
         
