@@ -1,3 +1,4 @@
+#This file contains the core logic for interacting with the SQLite database. It includes functions for initializing the database, inserting new events, and fetching events from the last 24 hours.
 import sqlite3
 import os
 

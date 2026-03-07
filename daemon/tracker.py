@@ -1,3 +1,4 @@
+# This file contains the core logic for tracking the active window and user activity on a Windows machine. It captures the title and process name of the currently active window, detects when the user switches windows, and sends this information to the backend for storage and analysis. The tracker also includes idle detection to avoid logging events when the user is inactive for extended periods.
 import time
 import win32gui
 import win32api
