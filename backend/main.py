@@ -1,3 +1,4 @@
+#takes the requests from the frontend and processes them, either by saving to the database or querying for answers. This is the core of the backend logic.
 from datetime import datetime
 from fastapi import FastAPI, HTTPException,BackgroundTasks
 from pydantic import BaseModel

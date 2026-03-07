@@ -1,3 +1,4 @@
+#This file contains the core logic for the Retrieval-Augmented Generation (RAG) engine. It handles embedding OS events, storing them in a vector database, and generating answers to user queries based on that data.
 import requests
 import uuid
 from qdrant_client import QdrantClient
@@ -115,9 +116,9 @@ Answer:"""
 
     url = "http://localhost:11434/api/generate"
     payload = {
-        "model": "phi3",
+        "model": "phi3:mini",
         "prompt": prompt,
-        "stream": False 
+        "stream": False #we want to stream the response back as it's generated
     }
     
     try:
