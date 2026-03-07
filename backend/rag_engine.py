@@ -33,8 +33,7 @@ def store_in_vector_db(sqlite_id: int, timestamp: str, process: str, window_titl
     """Converts the Os event into a sentence,embeds it and saves to qdrant."""
 
     #we turn raw data into a human-readable memory
-    memory_text= f"At {timestamp}, the user was working in {process} on {window_title}."
-
+    memory_text = f"Timestamp: {timestamp} | App: {process} | Window/File: {window_title}"
     try:
         #1.get the vector from ollama(phi3)
         vector = get_embedding(memory_text)
