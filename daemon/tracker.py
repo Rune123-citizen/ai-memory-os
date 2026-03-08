@@ -1,55 +1,42 @@
-# This file contains the core logic for tracking the active window and user activity on a Windows machine. It captures the title and process name of the currently active window, detects when the user switches windows, and sends this information to the backend for storage and analysis. The tracker also includes idle detection to avoid logging events when the user is inactive for extended periods.
 import time
 import win32gui
 import win32api
-import re
 import win32process
 import psutil
 import requests
 from datetime import datetime
 
 BACKEND_URL = "http://localhost:8000/ingest"
+
 def get_active_window_info():
-    """Get the title and process name of the currently active window."""
     try:
-        #Get the ID of the active window
         hwnd = win32gui.GetForegroundWindow()
-
-        #Get the Title of the active window
         window_title = win32gui.GetWindowText(hwnd)
-
-        #Get the Process ID of the active window
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
-
-        #Get the actual executable name (e.g., code.exe,chrome.exe)
-        process=psutil.Process(pid)
-        process_name = process.name()
-
+        process = psutil.Process(pid)
         return {
-            "process_name": process_name,
+            "process_name": process.name(),
             "window_title": window_title
         }
-    except Exception as e:
+    except Exception:
         return None
 
 def clean_title(title: str) -> str:
-    """Removes clutter from window titles (e.g., ' - Visual Studio Code')."""
     parts = title.split(" - ")
-    # If the title has dashes, just keep the first part (usually the document/file name)
     if len(parts) > 1:
         return parts[0].strip()
     return title.strip()
 
 def get_idle_time():
-    """Returns the number of seconds since the user last touched the mouse or keyboard."""
     last_input = win32api.GetLastInputInfo()
     current_tick = win32api.GetTickCount()
     return (current_tick - last_input) / 1000.0
 
 def run_tracker(poll_interval=5, idle_threshold=180):
-    """Runs continuously, but pauses if the user is idle for more than 3 minutes (180s)."""
     print(f"[*] Starting OS Context Tracker. Polling every {poll_interval} seconds...")
     last_window_title = ""
+    last_process = ""
+    start_time = time.time()
 
     while True:
         idle_time = get_idle_time()
@@ -57,32 +44,38 @@ def run_tracker(poll_interval=5, idle_threshold=180):
         if idle_time > idle_threshold:
             print(f"[IDLE] User inactive for {int(idle_time)}s. Pausing tracking...")
             time.sleep(poll_interval)
-            continue # Skip logging until they come back
+            continue
 
         window_info = get_active_window_info()
         
         if window_info:
             raw_title = window_info["window_title"]
             cleaned_title = clean_title(raw_title)
+            process_name = window_info["process_name"]
             
-            # Only log if they switched tabs/windows AND it's not empty
             if cleaned_title != last_window_title and cleaned_title != "":
+                end_time = time.time()
+                duration_seconds = int(end_time - start_time)
                 
-                event_data = {
-                    "timestamp": datetime.now().isoformat(),
-                    "process": window_info["process_name"],
-                    "window_title": cleaned_title,
-                    "event_type": "window_switch"
-                }
-                
-                print(f"[EVENT] {event_data['process']} -> {event_data['window_title']}")
-                
-                try:
-                    requests.post(BACKEND_URL, json=event_data, timeout=1.0) # Short timeout to avoid hanging if backend is down
-                except requests.exceptions.ConnectionError:
-                    print("[!] Backend is down. Event not sent.")
+                if duration_seconds > 3 and last_window_title != "":
+                    event_data = {
+                        "timestamp": datetime.now().isoformat(),
+                        "process": last_process, 
+                        "window_title": last_window_title,
+                        "event_type": "window_session",
+                        "duration_seconds": duration_seconds
+                    }
+                    
+                    print(f"[EVENT] {event_data['process']} -> {event_data['window_title']} ({duration_seconds}s)")
+                    
+                    try:
+                        requests.post(BACKEND_URL, json=event_data, timeout=2.0)
+                    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                        print("[!] Backend is down or busy. Event dropped.")
 
+                start_time = time.time()
                 last_window_title = cleaned_title
+                last_process = process_name
                 
         time.sleep(poll_interval)
 
