@@ -1,45 +1,42 @@
-#takes the requests from the frontend and processes them, either by saving to the database or querying for answers. This is the core of the backend logic.
 from datetime import datetime
-from fastapi import FastAPI, HTTPException,BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import sqlite3
 from collections import Counter
-from backend.database import insert_event,DB_PATH,get_todays_events
-from backend.rag_engine import store_in_vector_db,search_vector_db,generate_answer,qdrant,COLLECTION_NAME
+from backend.database import insert_event, DB_PATH, get_todays_events
+from backend.rag_engine import store_in_vector_db, search_vector_db, generate_answer, qdrant, COLLECTION_NAME, extract_query_metadata
 
-#Initialize FastAPI app
-app = FastAPI(title="Memory OS Backend")
+app = FastAPI(title="NeuroLayer OS Backend")
 
 class EventPayload(BaseModel):
     timestamp: str
     process: str
     window_title: str
     event_type: str
+    duration_seconds: int = 0
 
 @app.get("/")
 def read_root():
-    return {"status": "Memory OS Backend is running!"}
+    return {"status": "NeuroLayer OS Backend is running!"}
 
 @app.post("/ingest")
 def ingest_event(event: EventPayload, background_tasks: BackgroundTasks):
-    """Receives OS events from the daemon and stores them in SQLite, and triggers vector DB storage."""
     try:
-        #save to database(sqlite)
         event_id = insert_event(
             timestamp=event.timestamp,
             process=event.process,
             window_title=event.window_title,
-            event_type=event.event_type
+            event_type=event.event_type,
+            duration_seconds=event.duration_seconds
         )
-        print(f"[API] Stored event in sqlite: {event.process} - {event.window_title}")
 
-        #2.save to qdrant (runs in background so it doesn't slow down the os tracker)
         background_tasks.add_task(
             store_in_vector_db,
             sqlite_id=event_id,
             timestamp=event.timestamp,
             process=event.process,
-            window_title=event.window_title
+            window_title=event.window_title,
+            duration=event.duration_seconds
         )
 
         return {"status": "Success","message": "Event stored and embedding queued."}
@@ -52,43 +49,93 @@ class QueryPayload(BaseModel):
 
 @app.post("/query")
 def query_memory(payload: QueryPayload):
-    """Handles user questions by searching memory and generating an AI response."""
-
     try:
-        #1.retreive relevant context from qdrant
-        context = search_vector_db(payload.question)
+        # Step 1: Route and clean the query
+        metadata = extract_query_metadata(payload.question)
+        clean_keywords = metadata.get("keywords", payload.question)
+        
+        # --- SAFETY CHECK: Squash lists into a string ---
+        if isinstance(clean_keywords, list):
+            clean_keywords = " ".join(clean_keywords)
+        elif not isinstance(clean_keywords, str):
+            clean_keywords = str(clean_keywords)
+            
+        # --- AGGRESSIVE ALIAS MAPPING ---
+        target_app = metadata.get("app_name")
+        
+        app_aliases = {
+            "vs code": "Code.exe",
+            "vscode": "Code.exe",
+            "visual studio code": "Code.exe",
+            "code": "Code.exe",
+            "chrome": "chrome.exe",
+            "google chrome": "chrome.exe",
+            "powershell": "WindowsTerminal.exe",
+            "terminal": "WindowsTerminal.exe",
+            "windows terminal": "WindowsTerminal.exe",
+            "explorer": "explorer.exe",
+            "file explorer": "explorer.exe",
+            "windows explorer": "explorer.exe"
+        }
+
+        # FIX 1: If the AI missed the app name, fish it out of the keywords
+        if not target_app:
+            lower_keywords = clean_keywords.lower()
+            for alias in app_aliases.keys():
+                if alias in lower_keywords:
+                    target_app = alias
+                    print(f"[ROUTER] Fished app name '{alias}' out of keywords.")
+                    break
+
+        # FIX 2: Normalize the string and strip hallucinated '.exe' tags
+        if target_app and isinstance(target_app, str):
+            clean_target = target_app.lower().strip()
+            
+            # If the AI added '.exe' to human slang (e.g., "vs code.exe"), strip it
+            if clean_target.endswith(".exe") and clean_target not in app_aliases.values():
+                clean_target = clean_target[:-4].strip()
+            
+            # Map to the exact OS process name
+            if clean_target in app_aliases:
+                final_target = app_aliases[clean_target]
+                print(f"[ROUTER] Alias mapped '{target_app}' -> '{final_target}'")
+                target_app = final_target
+            elif clean_target in [val.lower() for val in app_aliases.values()]:
+                # If it already extracted exactly "code.exe", keep it!
+                pass 
+        # -----------------------------------------------------------
+
+        # Step 2: Retrieve relevant context from Qdrant using Hybrid Search & Filters
+        context = search_vector_db(clean_keywords, target_process=target_app)
 
         if not context:
             return {
                 "question": payload.question,
-                "answer": "I don't have any recent memory related to that.",
+                "answer": "No records found for this query.",
                 "context_used": []
             }
         
-        #2.generate the answer using phi3
+        # Step 3: Generate the answer using phi3
         answer = generate_answer(payload.question, context)
 
-        #3.return the Ai's response along with the raw memories it used
-        return{
+        return {
             "question": payload.question,
+            "extracted_metadata": metadata,
             "answer": answer.strip(),
-            "context_used": context.split("\n")  #return the individual memories as a list
+            "context_used": context.split("\n") 
         }
     except Exception as e:
         print(f"[API] Query Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error")
-
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+        
 @app.get("/debug")
 def debug_status():
-    """checks how many records are in sqlite vs qdrant."""
-    #check sqlite count
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM events")
     db_count = cursor.fetchone()[0]
     conn.close()
 
-    #check qdrant count
     try:
         qdrant_info = qdrant.get_collection(COLLECTION_NAME)
         vector_count = qdrant_info.points_count
@@ -102,65 +149,54 @@ def debug_status():
 
 @app.get("/query/today")
 def query_today():
-    """generates a perfect summary of today's events bypassing the vector db."""
     try:
         events = get_todays_events()
         if not events:
             return {"answer": "No activity recorded in the last 24 hours."}
         
-        summary_counts=Counter([f"{e['process']} - '{e['window_title']}'" for e in events])
+        summary_counts = Counter()
+        for e in events:
+            key = f"{e['process']} - '{e['window_title']}'"
+            summary_counts[key] += e['duration_seconds']
 
-        #format the raw logs into a readable string for the AI
-        context_lines = [f"Used {item} (Logged {count} times)" for item, count in summary_counts.items()]
+        context_lines = [f"Used {item} for {count} seconds" for item, count in summary_counts.items()]
         context_text = "\n".join(context_lines)
 
         print(f"[API] compressed {len(events)} raw events into {len(context_lines)} unique activities for the AI")
 
+        prompt = "Summarize my computer activity for today based on these aggregate logs. Group your answer by application or project and mention time spent."
+        answer = generate_answer(prompt, context_text)
 
-        #ask phi3 to summarize today's activity
-        prompt ="Summarize my computer activity for today based on these aggregate logs. Group your answer by application or project."
-        answer= generate_answer(prompt, context_text)
-
-        return {"answer": answer,"raw_events_processed": len(events)}
+        return {"answer": answer, "raw_events_processed": len(events)}
     except Exception as e:
         print(f"[API] Error in query/today: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
     
-
 @app.post("/consolidate")
 def consolidate_memory():
-    """Summarizes today's logs, saves the summary to Qdrant, and deletes old SQLite logs."""
     try:
-        # 1. Grab today's events
         events = get_todays_events()
         if not events:
             return {"message": "Nothing to consolidate today."}
             
-        context_lines = [f"Used {e['process']} on '{e['window_title']}'" for e in events]
+        context_lines = [f"Used {e['process']} on '{e['window_title']}' for {e['duration_seconds']}s" for e in events]
         context_text = "\n".join(context_lines)
         
-        # 2. Ask phi3 to create a dense, permanent memory
         summary_prompt = "Write a dense, 2-paragraph summary of what the user accomplished based on this activity log. Focus on the main themes and projects."
         daily_summary = generate_answer(summary_prompt, context_text)
         
-        # 3. Save this summary to Qdrant permanently
         store_in_vector_db(
-            sqlite_id=0, # 0 indicates it's a consolidated memory
+            sqlite_id=0,
             timestamp=datetime.now().isoformat(),
             process="System",
-            window_title="Daily Consolidation"
+            window_title="Daily Consolidation",
+            duration=0
         )
-        # Note: We'd normally pass the `daily_summary` text here, but to keep your rag_engine simple, 
-        # it will store the 'System - Daily Consolidation' tag alongside the semantic embedding.
         
-        # 4. Wipe SQLite to keep it fast (Optional: comment this out if you want to keep raw logs for now)
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        #cursor.execute("DELETE FROM events") #previously: Deleting everything but now 
         now_str = datetime.now().isoformat()
         cursor.execute("DELETE FROM events WHERE timestamp < ?", (now_str,)) 
-        #only delete events older than now, just in case there are any future-dated logs for some reason. \
-        #This is a safer approach that ensures we don't accidentally delete the consolidated memory we just created if it happens to have a timestamp issue.
         conn.commit()
         conn.close()
         
@@ -170,6 +206,5 @@ def consolidate_memory():
     
 @app.get("/debug/today")
 def debug_today():
-    """Returns today's raw logs without using the AI."""
     events = get_todays_events()
     return {"total_events_today": len(events), "data": events}

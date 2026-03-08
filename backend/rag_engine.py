@@ -1,110 +1,149 @@
-#This file contains the core logic for the Retrieval-Augmented Generation (RAG) engine. It handles embedding OS events, storing them in a vector database, and generating answers to user queries based on that data.
 import requests
 import uuid
+import json
+from fastembed import SparseTextEmbedding
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct
+from qdrant_client.models import (
+    VectorParams, Distance, PointStruct, 
+    SparseVectorParams, SparseVector, 
+    Prefetch, FusionQuery, Fusion,
+    Filter, FieldCondition, MatchValue
+)
 
-#connect to local qdrant instance runnign in docker
-qdrant=QdrantClient("http://localhost:6333")
-COLLECTION_NAME = "memory_events"
+qdrant = QdrantClient("http://localhost:6333")
+COLLECTION_NAME = "neurolayer_memory_hybrid"
 
-#nomic-embed-key outputs vectors with 768 dimensions
+sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
+
 try:
     qdrant.get_collection(COLLECTION_NAME)
 except Exception:
     qdrant.create_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=768, distance=Distance.COSINE)
+        vectors_config={"dense": VectorParams(size=768, distance=Distance.COSINE)},
+        sparse_vectors_config={"sparse": SparseVectorParams()}
     )
-    print(f"Created Qdrant collection: {COLLECTION_NAME}")
+    print(f"Created Hybrid Qdrant collection: {COLLECTION_NAME}")
 
 def get_embedding(text: str) -> list[float]:
-    """Asks the local ollama to convert text into a mathematical vector."""
     url = "http://localhost:11434/api/embeddings"
-    payload = {
-        "model": "nomic-embed-text",
-        "prompt": text
-    }
+    payload = {"model": "nomic-embed-text", "prompt": text}
     response = requests.post(url, json=payload)
     response.raise_for_status()
     return response.json()["embedding"]
 
-def store_in_vector_db(sqlite_id: int, timestamp: str, process: str, window_title: str):
-    """Converts the Os event into a sentence,embeds it and saves to qdrant."""
+def extract_query_metadata(question: str) -> dict:
+    print(f"\n[ROUTER] Extracting metadata from: '{question}'")
+    
+    # --- UPDATED STRICT PROMPT ---
+    prompt = f"""You are a query router. Extract the core search terms from this question.
+Question: {question}
 
-    #we turn raw data into a human-readable memory
-    memory_text = f"Timestamp: {timestamp} | App: {process} | Window/File: {window_title}"
+Output ONLY a valid JSON object with two keys:
+1. 'app_name': The specific application mentioned (e.g., 'Code.exe', 'chrome.exe'). If none, output null.
+2. 'keywords': The core topic they are looking for, without filler words (MUST be a single string, NOT a list).
+
+JSON Output:"""
+
+    url = "http://localhost:11434/api/generate"
+    payload = {"model": "phi3:mini", "prompt": prompt, "stream": False, "format": "json"}
+    
     try:
-        #1.get the vector from ollama(phi3)
-        vector = get_embedding(memory_text)
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        parsed_data = json.loads(response.json()["response"])
+        print(f"[ROUTER] Extracted Data: {parsed_data}")
+        return parsed_data
+    except Exception as e:
+        print(f"[!] Router failed, falling back to raw question. Error: {e}")
+        return {"app_name": None, "keywords": question}
 
-        #2.save it to qdrant alongside the original sqlite id
-        point_id =  str(uuid.uuid4())  #generate a unique id for qdrant
+def store_in_vector_db(sqlite_id: int, timestamp: str, process: str, window_title: str, duration: int):
+    memory_text = f"App: {process} | Window/File: {window_title} | Duration: {duration}s | Time: {timestamp}"
+
+    try:
+        dense_vector = get_embedding(memory_text)
+        sparse_result = list(sparse_model.embed([memory_text]))[0]
+        sparse_vector = {
+            "indices": sparse_result.indices.tolist(), 
+            "values": sparse_result.values.tolist()
+        }
+
+        point_id = str(uuid.uuid4())
         qdrant.upsert(
             collection_name=COLLECTION_NAME,
             points=[
                 PointStruct(
                     id=point_id,
-                    vector=vector,
+                    vector={"dense": dense_vector, "sparse": sparse_vector},
                     payload={
                         "sqlite_id": sqlite_id,
                         "timestamp": timestamp,
                         "process": process,
                         "window_title": window_title,
+                        "duration_seconds": duration,
                         "text": memory_text
                     }
                 )
             ]
         )
-        print(f"[VECTOR DB] saved semantic memory: '{memory_text}'")
+        print(f"[VECTOR DB] Saved hybrid memory: '{memory_text}'")
     except Exception as e:
-        print(f"[!] failed to store in vector DB: {e}")
+        print(f"[!] Failed to store in vector DB: {e}")
 
-def search_vector_db(query_text: str, limit: int = 15) -> str:
-    """Embeds the users question and retreives the most relevant memories from qdrant."""
+def search_vector_db(query_text: str, target_process: str = None, limit: int = 15) -> str:
     try:
-        print(f"\n[SEARCH] 1.Embedding question: '{query_text}'")
-        #1.convert the question into a vector
-        query_vector = get_embedding(query_text)
+        print(f"\n[SEARCH] 1. Embedding query for Hybrid Search: '{query_text}'")
         
-        print(f"[SEARCH] 2.Querying Qdrant database...")
-        #2.search qdrant for the closest matching os events stored
+        query_dense = get_embedding(query_text)
+        query_sparse_result = list(sparse_model.embed([query_text]))[0]
+        query_sparse = SparseVector(
+            indices=query_sparse_result.indices.tolist(), 
+            values=query_sparse_result.values.tolist()
+        )
+        
+        query_filter = None
+        if target_process:
+            query_filter = Filter(must=[FieldCondition(key="process", match=MatchValue(value=target_process))])
+
+        print(f"[SEARCH] 2. Querying Qdrant database using Reciprocal Rank Fusion...")
+        
         search_response = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query=query_vector,
+            prefetch=[
+                Prefetch(query=query_dense, using="dense", limit=limit, filter=query_filter),
+                Prefetch(query=query_sparse, using="sparse", limit=limit, filter=query_filter)
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
             limit=limit,
-            with_payload=True  #we want the original text back, not just the vector
+            with_payload=True
         )
-        search_result= search_response.points
-
+        
+        search_result = search_response.points
         print(f"[SEARCH] 3. Found {len(search_result)} relevant memories.")
-        #3.extract the text payload from the results
+
         if not search_result:
             return ""
         
-        context_lines = []
-        for hit in search_result:
-            if hit.payload and "text" in hit.payload:
-                context_lines.append(hit.payload["text"])
+        valid_hits = [hit for hit in search_result if hit.payload and "timestamp" in hit.payload]
+        valid_hits.sort(key=lambda x: x.payload["timestamp"])
         
-        final_context = "\n".join(context_lines)
-        print(f"[SEARCH] 4.Context successfully extracted: {len(context_lines)} lines.")
-        return final_context
+        context_lines = [hit.payload["text"] for hit in valid_hits]
+        return "\n".join(context_lines)
     
     except Exception as e:
-        print(f"[!] failed to search vector DB: {e}")
+        print(f"[!] Failed to search vector DB: {e}")
         return ""
 
 def generate_answer(question: str, context: str) -> str:
-    """Sends the retrieved context and the question to local phi3."""
-    
     prompt = f"""You are JARVIS, a highly analytical and precise Personal Memory OS. 
 Your job is to answer the user's question based STRICTLY on the provided timeline of their computer activity.
+
 Rules:
 1. Output your response in clean, concise bullet points.
 2. Be direct and highly analytical. 
-3. Never apologize. If the answer is not in the context, simply state: "No records found for this query."
-4. Do not invent or guess any information.
+3. CRITICAL: If the provided context does not explicitly contain the application, project, or information requested, YOU MUST reply: "No records found for this query." Do NOT invent, assume, or substitute information.
+4. Factor in the duration of the tasks to provide better context if relevant.
 
 Activity Context:
 {context}
@@ -114,16 +153,12 @@ User Question: {question}
 Answer:"""
 
     url = "http://localhost:11434/api/generate"
-    payload = {
-        "model": "phi3:mini",
-        "prompt": prompt,
-        "stream": False #we want to stream the response back as it's generated
-    }
+    payload = {"model": "phi3:mini", "prompt": prompt, "stream": False}
     
     try:
         print("\n[AI] Thinking... (Sending data to Ollama)")
         response = requests.post(url, json=payload)
-        response.raise_for_status() # This will catch if Ollama returns an error code
+        response.raise_for_status() 
         return response.json()["response"]
     except Exception as e:
         print(f"[!] AI Generation failed: {e}")
