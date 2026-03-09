@@ -3,8 +3,14 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import sqlite3
 from collections import Counter
+
 from backend.database import insert_event, DB_PATH, get_todays_events
-from backend.rag_engine import store_in_vector_db, search_vector_db, generate_answer, qdrant, COLLECTION_NAME, extract_query_metadata
+from backend.rag_engine import store_in_vector_db, generate_answer, qdrant, COLLECTION_NAME
+
+# --- NEW MODULAR PIPELINE IMPORTS ---
+from backend.query_parser import parse_query
+from backend.retrieval_engine import retrieve_memories
+from backend.context_ranker import rank_memories
 
 app = FastAPI(title="NeuroLayer OS Backend")
 
@@ -49,85 +55,42 @@ class QueryPayload(BaseModel):
 
 @app.post("/query")
 def query_memory(payload: QueryPayload):
+    """
+    Executes the modular Phase 1 RAG Pipeline:
+    Parser -> Hybrid Retrieval -> Context Ranker -> Generation
+    """
     try:
-        # Step 1: Route and clean the query
-        metadata = extract_query_metadata(payload.question)
-        clean_keywords = metadata.get("keywords", payload.question)
+        # Step 1: Query Understanding (Extracts JSON filters & aliases)
+        parsed_query = parse_query(payload.question)
         
-        # --- SAFETY CHECK: Squash lists into a string ---
-        if isinstance(clean_keywords, list):
-            clean_keywords = " ".join(clean_keywords)
-        elif not isinstance(clean_keywords, str):
-            clean_keywords = str(clean_keywords)
-            
-        # --- AGGRESSIVE ALIAS MAPPING ---
-        target_app = metadata.get("app_name")
+        # Step 2: Hybrid Retrieval (Queries SQLite & Qdrant, merges results)
+        raw_memories = retrieve_memories(parsed_query)
         
-        app_aliases = {
-            "vs code": "Code.exe",
-            "vscode": "Code.exe",
-            "visual studio code": "Code.exe",
-            "code": "Code.exe",
-            "chrome": "chrome.exe",
-            "google chrome": "chrome.exe",
-            "powershell": "WindowsTerminal.exe",
-            "terminal": "WindowsTerminal.exe",
-            "windows terminal": "WindowsTerminal.exe",
-            "explorer": "explorer.exe",
-            "file explorer": "explorer.exe",
-            "windows explorer": "explorer.exe"
-        }
-
-        # FIX 1: If the AI missed the app name, fish it out of the keywords
-        if not target_app:
-            lower_keywords = clean_keywords.lower()
-            for alias in app_aliases.keys():
-                if alias in lower_keywords:
-                    target_app = alias
-                    print(f"[ROUTER] Fished app name '{alias}' out of keywords.")
-                    break
-
-        # FIX 2: Normalize the string and strip hallucinated '.exe' tags
-        if target_app and isinstance(target_app, str):
-            clean_target = target_app.lower().strip()
-            
-            # If the AI added '.exe' to human slang (e.g., "vs code.exe"), strip it
-            if clean_target.endswith(".exe") and clean_target not in app_aliases.values():
-                clean_target = clean_target[:-4].strip()
-            
-            # Map to the exact OS process name
-            if clean_target in app_aliases:
-                final_target = app_aliases[clean_target]
-                print(f"[ROUTER] Alias mapped '{target_app}' -> '{final_target}'")
-                target_app = final_target
-            elif clean_target in [val.lower() for val in app_aliases.values()]:
-                # If it already extracted exactly "code.exe", keep it!
-                pass 
-        # -----------------------------------------------------------
-
-        # Step 2: Retrieve relevant context from Qdrant using Hybrid Search & Filters
-        context = search_vector_db(clean_keywords, target_process=target_app)
+        # Step 3: Context Ranking (Scores by Similarity, Importance, Recency)
+        # We only pass the absolute best 5 memories to the LLM to save context.
+        context = rank_memories(raw_memories, top_k=5)
 
         if not context:
             return {
                 "question": payload.question,
+                "extracted_metadata": parsed_query,
                 "answer": "No records found for this query.",
                 "context_used": []
             }
         
-        # Step 3: Generate the answer using phi3
+        # Step 4: Final AI Generation (JARVIS reads the ranked timeline)
         answer = generate_answer(payload.question, context)
 
         return {
             "question": payload.question,
-            "extracted_metadata": metadata,
+            "extracted_metadata": parsed_query,
             "answer": answer.strip(),
             "context_used": context.split("\n") 
         }
     except Exception as e:
         print(f"[API] Query Error: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
-        
+
 @app.get("/debug")
 def debug_status():
     conn = sqlite3.connect(DB_PATH)
