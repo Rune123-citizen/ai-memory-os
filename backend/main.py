@@ -8,7 +8,7 @@ from collections import Counter
 
 
 from backend.database import insert_event, DB_PATH, get_todays_events
-from backend.rag_engine import store_in_vector_db, generate_answer, qdrant, COLLECTION_NAME, apply_memeory_decay
+from backend.rag_engine import store_in_vector_db, generate_answer, qdrant, COLLECTION_NAME
 
 # --- NEW MODULAR PIPELINE IMPORTS ---
 from backend.query_parser import parse_query
@@ -112,7 +112,7 @@ def consolidate_memory():
         context_lines = [f"Used {e['process']} on '{e['window_title']}' for {e['duration_seconds']}s" for e in events]
         context_text = "\n".join(context_lines)
         
-        summary_prompt = "Write a dense, 3-paragraph summary of what the user accomplished based on this activity log. Focus on the main themes and projects, and tasks."
+        summary_prompt = "Write a dense, 2-paragraph summary of what the user accomplished based on this activity log. Focus on the main themes and projects, and tasks."
 
         #consumes the stream
         stream = generate_answer(summary_prompt, context_text)
@@ -130,7 +130,6 @@ def consolidate_memory():
             text_override=summary_text
         )
 
-        apply_memeory_decay() #clean up old memories after consolidating
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()

@@ -6,8 +6,7 @@ from qdrant_client import QdrantClient
 from datetime import datetime,timedelta
 from qdrant_client.models import (
     VectorParams, Distance, PointStruct, 
-    SparseVectorParams,Filter, FieldCondition,
-    Range, DatetimeRange
+    SparseVectorParams
 )
 
 # Connect to local Qdrant instance
@@ -74,24 +73,6 @@ def store_in_vector_db(sqlite_id: int, timestamp: str, process: str, window_titl
     except Exception as e:
         print(f"[!] Failed to store in vector DB: {e}")
 
-def apply_memeory_decay():
-    """Memory deacy system: Removes old, low-value memories."""
-    #threshold:older than 14 days and importance < 0.4
-    decay_threshold = (datetime.now() - timedelta(days=14)).isoformat()
-
-    try:
-        qdrant.delete(
-            collection_name=COLLECTION_NAME,
-            points_selector=Filter(
-                must=[
-                    FieldCondition(key="timestamp", range=DatetimeRange(lte=decay_threshold)),
-                    FieldCondition(key="importance", range=Range(lt=0.4))
-                ]
-            )
-        )
-        print("[Maintainence] Applied memory decay to remove old, low-importance memories.")
-    except Exception as e:
-        print(f"[!] Memory decay failed: {e}")
         
 def generate_answer(question: str, context: str):
     """Sends the retrieved context and the question to local phi3."""
