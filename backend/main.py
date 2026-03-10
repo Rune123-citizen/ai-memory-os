@@ -1,16 +1,20 @@
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import sqlite3
 from collections import Counter
 
+
+
 from backend.database import insert_event, DB_PATH, get_todays_events
-from backend.rag_engine import store_in_vector_db, generate_answer, qdrant, COLLECTION_NAME
+from backend.rag_engine import store_in_vector_db, generate_answer, qdrant, COLLECTION_NAME, apply_memeory_decay
 
 # --- NEW MODULAR PIPELINE IMPORTS ---
 from backend.query_parser import parse_query
 from backend.retrieval_engine import retrieve_memories
 from backend.context_ranker import rank_memories
+from backend.semantic_engine import build_sessions
 
 app = FastAPI(title="NeuroLayer OS Backend")
 
@@ -28,7 +32,7 @@ def read_root():
 @app.post("/ingest")
 def ingest_event(event: EventPayload, background_tasks: BackgroundTasks):
     try:
-        event_id = insert_event(
+        insert_event(
             timestamp=event.timestamp,
             process=event.process,
             window_title=event.window_title,
@@ -36,24 +40,18 @@ def ingest_event(event: EventPayload, background_tasks: BackgroundTasks):
             duration_seconds=event.duration_seconds
         )
 
-        background_tasks.add_task(
-            store_in_vector_db,
-            sqlite_id=event_id,
-            timestamp=event.timestamp,
-            process=event.process,
-            window_title=event.window_title,
-            duration=event.duration_seconds
-        )
+        #trigger session builder in the background after every new event. It will batch process unprocessed events every minute or when it hits a batch of 5.
+        background_tasks.add_task(build_sessions)
 
-        return {"status": "Success","message": "Event stored and embedding queued."}
+        return {"status": "Success","message": "Event stored and session builder queued."}
     except Exception as e:
-        print(f"[API ERROR] Failed to store event: {str(e)}")
+        print(f"[API ERROR] failed to store event: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to ingest event: {str(e)}")
     
 class QueryPayload(BaseModel):
     question: str
 
-@app.post("/query")
+@app.post("/query/stream")
 def query_memory(payload: QueryPayload):
     """
     Executes the modular Phase 1 RAG Pipeline:
@@ -71,22 +69,14 @@ def query_memory(payload: QueryPayload):
         context = rank_memories(raw_memories, top_k=5)
 
         if not context:
-            return {
-                "question": payload.question,
-                "extracted_metadata": parsed_query,
-                "answer": "No records found for this query.",
-                "context_used": []
-            }
+            def empty_response():
+                yield "No records found for this query."
+            return StreamingResponse(empty_response(), media_type="text/event-stream")
         
         # Step 4: Final AI Generation (JARVIS reads the ranked timeline)
-        answer = generate_answer(payload.question, context)
+        generator = generate_answer(payload.question, context)
+        return StreamingResponse(generator, media_type="text/event-stream")
 
-        return {
-            "question": payload.question,
-            "extracted_metadata": parsed_query,
-            "answer": answer.strip(),
-            "context_used": context.split("\n") 
-        }
     except Exception as e:
         print(f"[API] Query Error: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -110,33 +100,10 @@ def debug_status():
         "qdrant_vectors": vector_count
     }
 
-@app.get("/query/today")
-def query_today():
-    try:
-        events = get_todays_events()
-        if not events:
-            return {"answer": "No activity recorded in the last 24 hours."}
-        
-        summary_counts = Counter()
-        for e in events:
-            key = f"{e['process']} - '{e['window_title']}'"
-            summary_counts[key] += e['duration_seconds']
-
-        context_lines = [f"Used {item} for {count} seconds" for item, count in summary_counts.items()]
-        context_text = "\n".join(context_lines)
-
-        print(f"[API] compressed {len(events)} raw events into {len(context_lines)} unique activities for the AI")
-
-        prompt = "Summarize my computer activity for today based on these aggregate logs. Group your answer by application or project and mention time spent."
-        answer = generate_answer(prompt, context_text)
-
-        return {"answer": answer, "raw_events_processed": len(events)}
-    except Exception as e:
-        print(f"[API] Error in query/today: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
     
 @app.post("/consolidate")
 def consolidate_memory():
+    """Long term memory & deecay system."""
     try:
         events = get_todays_events()
         if not events:
@@ -145,16 +112,25 @@ def consolidate_memory():
         context_lines = [f"Used {e['process']} on '{e['window_title']}' for {e['duration_seconds']}s" for e in events]
         context_text = "\n".join(context_lines)
         
-        summary_prompt = "Write a dense, 2-paragraph summary of what the user accomplished based on this activity log. Focus on the main themes and projects."
-        daily_summary = generate_answer(summary_prompt, context_text)
+        summary_prompt = "Write a dense, 3-paragraph summary of what the user accomplished based on this activity log. Focus on the main themes and projects, and tasks."
+
+        #consumes the stream
+        stream = generate_answer(summary_prompt, context_text)
+        daily_summary = "".join([chunk for chunk in stream])
+        
+        summary_text = f"Daily summary ({datetime.now().strftime('%B %d')}): {daily_summary}"
         
         store_in_vector_db(
             sqlite_id=0,
             timestamp=datetime.now().isoformat(),
             process="System",
-            window_title="Daily Consolidation",
-            duration=0
+            window_title="Daily Summary",
+            duration=86400,
+            importance=1.0,
+            text_override=summary_text
         )
+
+        apply_memeory_decay() #clean up old memories after consolidating
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()

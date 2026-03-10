@@ -135,7 +135,8 @@ def search_qdrant_vectors(query_string: str, target_app: str = None, start_time:
                     "source": "qdrant_vector",
                     "timestamp": hit.payload["timestamp"],
                     "text": hit.payload["text"],
-                    "score": hit.score 
+                    "score": hit.score,
+                    "importance": hit.payload.get("importance", 0.5)
                 })
                 
     except Exception as e:
