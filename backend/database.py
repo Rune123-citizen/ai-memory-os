@@ -15,9 +15,16 @@ def init_db():
             process TEXT NOT NULL,
             window_title TEXT NOT NULL,
             event_type TEXT NOT NULL,
-            duration_seconds INTEGER DEFAULT 0
+            duration_seconds INTEGER DEFAULT 0,
+            is_processed INTEGER DEFAULT 0
         )
     ''')
+
+    #Failsafe: Add column to existing DB if upgrading
+    try:
+        cursor.execute("ALTER TABLE events ADD COLUMN is_processed INTEGER DEFAULT 0")
+    except:
+        pass
 
     conn.commit()
     conn.close()
@@ -28,8 +35,8 @@ def insert_event(timestamp: str, process: str, window_title: str, event_type: st
     cursor = conn.cursor()
 
     cursor.execute('''
-        INSERT INTO events (timestamp, process, window_title, event_type, duration_seconds)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO events (timestamp, process, window_title, event_type, duration_seconds, is_processed)
+        VALUES (?, ?, ?, ?, ?, 0)
     ''', (timestamp, process, window_title, event_type, duration_seconds))
 
     event_id = cursor.lastrowid
@@ -40,7 +47,7 @@ def insert_event(timestamp: str, process: str, window_title: str, event_type: st
 def get_todays_events():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     yesterday = (datetime.now() - timedelta(days=1)).isoformat()
     
     cursor.execute('''
@@ -53,5 +60,26 @@ def get_todays_events():
     conn.close()
     
     return [{"timestamp": r[0], "process": r[1], "window_title": r[2], "duration_seconds": r[3]} for r in rows]
+
+def get_unprocessed_events():
+    """Fetches raw logs that haven't been grouped into sessions yet."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, timestamp, process, window_title, event_type, duration_seconds FROM events WHERE is_processed = 0 ORDER BY timestamp ASC")
+
+    rows = cursor.fetchall()
+    conn.close()
+    
+    return [{"id": r[0], "timestamp": r[1], "process": r[2], "window_title": r[3], "duration_seconds": r[4]} for r in rows]
+
+def mark_events_processed(event_ids: list):
+    """Marks raw logs as processed so they aren't batched again"""
+    if not event_ids:return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(f"UPDATE events SET is_processed = 1 WHERE id IN ({','.join('?' * len(event_ids))})", event_ids)
+    conn.commit()
+    conn.close()
 
 init_db()
