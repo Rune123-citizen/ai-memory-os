@@ -18,6 +18,10 @@ def parse_time_range(time_string: str):
     if "today" in time_lower:
         start_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end_time = now
+    # FIX: Check for "day before yesterday" FIRST so it doesn't get caught by "yesterday"
+    elif "day before yesterday" in time_lower or "2 days ago" in time_lower:
+        start_time = (now - timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+        end_time = start_time.replace(hour=23, minute=59, second=59)
     elif "yesterday" in time_lower:
         start_time = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         end_time = start_time.replace(hour=23, minute=59, second=59)
@@ -28,7 +32,7 @@ def parse_time_range(time_string: str):
         start_time = now - timedelta(days=30)
         end_time = now
     else:
-        return None, None # Fallback if we don't recognize the exact phrase
+        return None, None 
         
     print(f"[RETRIEVAL] Time Filter Active: {start_time.isoformat()} to {end_time.isoformat()}")
     return start_time.isoformat(), end_time.isoformat()

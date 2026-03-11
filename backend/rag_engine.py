@@ -73,7 +73,7 @@ def store_in_vector_db(sqlite_id: int, timestamp: str, process: str, window_titl
     except Exception as e:
         print(f"[!] Failed to store in vector DB: {e}")
 
-        
+
 def generate_answer(question: str, context: str):
     """Sends the retrieved context and the question to local phi3."""
     
@@ -81,13 +81,14 @@ def generate_answer(question: str, context: str):
     current_time = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
     
     prompt = f"""You are JARVIS, an intelligent, conversational Personal Memory OS assistant.
-You have access to a database of the user's recent computer activity.
+Current System Time: {current_time}
 
-Rules for your behavior:
-1. GREETINGS: If the user says hello, hi, or asks how you are, respond politely and conversationally like a helpful AI (e.g., "Hello! I am online. How can I assist you with your memory logs today?").
-2. MEMORY QUERIES: If the user asks about their past activity or what they worked on, answer STRICTLY using the 'Activity Context' provided below. Output these findings in clean bullet points.
-3. NO DATA: If they ask about past activity and it is not in the context, say you don't have records of that.
-4. Do not invent or hallucinate any computer activity.
+Strict Rules:
+1. IF the user is simply greeting you (e.g., "hi", "hello", "hey"), reply ONLY with a polite greeting and completely IGNORE the Activity Context. Do not output anything else.
+2. IF the user asks about their computer activity, answer using ONLY the 'Activity Context' below. Translate the raw machine logs into natural, conversational sentences.
+
+3. IF the user asks about activity but the Activity Context is empty, state clearly that you have no records for that query.
+4. NEVER invent, hallucinate, or assume computer activity.
 
 Activity Context:
 {context}
@@ -104,7 +105,8 @@ Answer:"""
         "options": {
             "temperature": 0.2,
             "num_predict": 120,
-            "num_ctx": 2048
+            "num_ctx": 2048,
+            "stop": ["User Question:", "\nUser Question", "Activity Context:"] # <--- THE FIX
         }
     }
     
@@ -120,4 +122,4 @@ Answer:"""
                     yield chunk["response"]
     except Exception as e:
         print(f"[!] AI Generation failed: {e}")
-        return f"Error connecting to AI: {e}"
+        yield f"Error connecting to AI: {e}"
