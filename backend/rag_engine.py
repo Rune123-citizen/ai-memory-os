@@ -82,12 +82,13 @@ def generate_answer(question: str, context: str):
     
     prompt = f"""You are JARVIS, an intelligent, conversational Personal Memory OS assistant.
 You have access to a database of the user's recent computer activity.
+current system time:{current_time}
 
-Rules for your behavior:
-1. GREETINGS: If the user says hello, hi, or asks how you are, respond politely and conversationally like a helpful AI (e.g., "Hello! I am online. How can I assist you with your memory logs today?").
-2. MEMORY QUERIES: If the user asks about their past activity or what they worked on, answer STRICTLY using the 'Activity Context' provided below. Output these findings in clean bullet points.
-3. NO DATA: If they ask about past activity and it is not in the context, say you don't have records of that.
-4. Do not invent or hallucinate any computer activity.
+Strict Rules:
+1. Answer the user's question using ONLY the 'Activity Context' below.
+2. If the context contains multiple events, list them clearly.
+3. CRITICAL: You must report the EXACT 'Duration' and 'Time' numbers provided in the context. Do NOT guess, alter, mix up, or calculate new numbers. 
+4. NEVER invent or hallucinate computer activity.
 
 Activity Context:
 {context}
@@ -102,9 +103,10 @@ Answer:"""
         "prompt": prompt, 
         "stream": True,
         "options": {
-            "temperature": 0.2,
-            "num_predict": 120,
-            "num_ctx": 2048
+            "temperature": 0.1,
+            "num_predict": 800,
+            "num_ctx": 2048,
+            "stop":["User Question:","\nUser Question","Activity Context:"]
         }
     }
     
@@ -121,3 +123,39 @@ Answer:"""
     except Exception as e:
         print(f"[!] AI Generation failed: {e}")
         return f"Error connecting to AI: {e}"
+
+
+def stream_general_chat(question: str):
+    """Sends a general query to phi3 without the strict OS memory constraints."""
+    
+    prompt = f"""You are an intelligent, helpful AI assistant. Answer the user's general question naturally and accurately.
+
+User Question: {question}
+
+Answer:"""
+
+    url = "http://localhost:11434/api/generate"
+    payload = {
+        "model": "phi3:mini",
+        "prompt": prompt,
+        "stream": True,
+        "options": {
+            "temperature": 0.6, # Slightly higher temperature for more natural, creative chatting
+            "num_predict": 300,
+            "num_ctx": 2048
+        }
+    }
+    
+    try:
+        print("\n[AI] Thinking... (General Chat Mode)")
+        response = requests.post(url, json=payload, stream=True)
+        response.raise_for_status() 
+
+        for line in response.iter_lines():
+            if line:
+                chunk = json.loads(line)
+                if "response" in chunk:
+                    yield chunk["response"] 
+    except Exception as e:
+        print(f"[!] AI Generation failed: {e}")
+        yield f"Error connecting to AI: {e}"

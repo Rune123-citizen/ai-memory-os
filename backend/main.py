@@ -8,7 +8,7 @@ from collections import Counter
 
 
 from backend.database import insert_event, DB_PATH, get_todays_events
-from backend.rag_engine import store_in_vector_db, generate_answer, qdrant, COLLECTION_NAME
+from backend.rag_engine import store_in_vector_db, generate_answer, qdrant, COLLECTION_NAME,stream_general_chat
 
 # --- NEW MODULAR PIPELINE IMPORTS ---
 from backend.query_parser import parse_query
@@ -54,12 +54,19 @@ class QueryPayload(BaseModel):
 @app.post("/query/stream")
 def query_memory(payload: QueryPayload):
     """
-    Executes the modular Phase 1 RAG Pipeline:
-    Parser -> Hybrid Retrieval -> Context Ranker -> Generation
+    Executes the modular phase 1 RAG pipeline with Two-level short-circuit routing.
     """
     try:
         # Step 1: Query Understanding (Extracts JSON filters & aliases)
         parsed_query = parse_query(payload.question)
+
+        # --- The intelligent router ---
+        if not parsed_query.get("requires_database", True):
+            print("[ROUTER] Level 2: LLM flagged as non-database query. using normal conversational AI.")
+            # Skip retrieval! Go straight to the AI so it can write the poem/joke/code natively
+            generator = stream_general_chat(payload.question)
+            return StreamingResponse(generator, media_type="text/event-stream")
+        # ---------------------------------------
         
         # Step 2: Hybrid Retrieval (Queries SQLite & Qdrant, merges results)
         raw_memories = retrieve_memories(parsed_query)

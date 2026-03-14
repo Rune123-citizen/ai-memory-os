@@ -71,7 +71,7 @@ def get_unprocessed_events():
     rows = cursor.fetchall()
     conn.close()
     
-    return [{"id": r[0], "timestamp": r[1], "process": r[2], "window_title": r[3], "duration_seconds": r[4]} for r in rows]
+    return [{"id": r[0], "timestamp": r[1], "process": r[2], "window_title": r[3],"event_type": r[4], "duration_seconds": r[5]} for r in rows]
 
 def mark_events_processed(event_ids: list):
     """Marks raw logs as processed so they aren't batched again"""

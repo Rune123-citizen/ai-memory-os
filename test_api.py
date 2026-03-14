@@ -5,7 +5,7 @@ import sys
 print("Initializing connection to NeuroLayer OS...\n")
 
 url = "http://localhost:8000/query/stream"
-payload = {"question": "What have I been working on today?"}
+payload = {"question": "Find the cricket_output file for me."}
 
 try:
     with requests.post(url, json=payload, stream=True) as response:
