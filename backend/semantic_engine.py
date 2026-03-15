@@ -86,7 +86,7 @@ def build_sessions():
         
         importance = (0.4 * dur_score) + (0.3 * s['weight']) + (0.2 * kw_score) + (0.1 * freq_score)
         importance = round(min(importance, 1.0), 3) 
-        
+            
         session_text = f"Activity: {s['activity']} | Project: {s['project']} | Duration: {s['duration']}s | Time: {s['start_time']} to {s['end_time']}"
         
         # Store the aggregated session, not the individual clicks!

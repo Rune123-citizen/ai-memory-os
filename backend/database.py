@@ -20,7 +20,7 @@ def init_db():
         )
     ''')
 
-    #Failsafe: Add column to existing DB if upgrading
+    # Failsafe: Add column to existing DB if upgrading
     try:
         cursor.execute("ALTER TABLE events ADD COLUMN is_processed INTEGER DEFAULT 0")
     except:
@@ -66,6 +66,7 @@ def get_unprocessed_events():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
+    # We are selecting 6 columns: id (0), timestamp (1), process (2), window_title (3), event_type (4), duration_seconds (5)
     cursor.execute("SELECT id, timestamp, process, window_title, event_type, duration_seconds FROM events WHERE is_processed = 0 ORDER BY timestamp ASC")
 
     rows = cursor.fetchall()
@@ -75,7 +76,8 @@ def get_unprocessed_events():
 
 def mark_events_processed(event_ids: list):
     """Marks raw logs as processed so they aren't batched again"""
-    if not event_ids:return
+    if not event_ids:
+        return
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(f"UPDATE events SET is_processed = 1 WHERE id IN ({','.join('?' * len(event_ids))})", event_ids)

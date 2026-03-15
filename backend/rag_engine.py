@@ -73,7 +73,7 @@ def store_in_vector_db(sqlite_id: int, timestamp: str, process: str, window_titl
     except Exception as e:
         print(f"[!] Failed to store in vector DB: {e}")
 
-        
+
 def generate_answer(question: str, context: str):
     """Sends the retrieved context and the question to local phi3."""
     
